@@ -10,6 +10,11 @@
 #   type       app | priv
 #   repo       repo URL, optionally with ?fingerprint=<sha256> to verify the index
 #
+# The [overrides] section at the end lists AOSP modules each app replaces,
+# so they are not installed.
+#
+[apps]
+
 # Store
 org.fdroid.fdroid                     F-Droid             product  all    presigned  app   https://f-droid.org/repo?fingerprint=43238D512C1E5EB2D6569F4A3AFBF5523418B82E0A3ED1552770ABB9A9C9CCAB
 com.aurora.store                      AuroraStore         product  all    presigned  app   https://f-droid.org/repo?fingerprint=43238D512C1E5EB2D6569F4A3AFBF5523418B82E0A3ED1552770ABB9A9C9CCAB
@@ -17,3 +22,6 @@ com.aurora.store                      AuroraStore         product  all    presig
 # microG (needs signature spoofing support in the ROM)
 com.google.android.gms                GmsCore             product  all    presigned  priv  https://microg.org/fdroid/repo?fingerprint=9BD06727E62796C0130EB6DAB39B73157451582CBD138E86C468ACC395D14165
 com.android.vending                   FakeStore           product  all    presigned  priv  https://microg.org/fdroid/repo?fingerprint=9BD06727E62796C0130EB6DAB39B73157451582CBD138E86C468ACC395D14165
+
+[overrides]
+# name                AOSP modules to replace (space separated)

@@ -31,6 +31,15 @@ org.fdroid.fdroid   F-Droid  system_ext  all   presigned  app   https://f-droid.
 line per arch with the same `name`; they become a single module with an
 `arch` block.
 
+To replace AOSP apps, list them in an `[overrides]` section after the
+apps. Each line is an app name followed by the AOSP modules it replaces;
+they end up in `overrides` and are no longer installed:
+
+```
+[overrides]
+Firefox   Browser2 Jelly
+```
+
 Downloaded APKs are always checked against the SHA-256 in the repo index.
 
 Output

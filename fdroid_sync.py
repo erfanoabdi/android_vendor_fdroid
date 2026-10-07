@@ -75,13 +75,29 @@ class Entry:
 
 
 def parse_list(path):
+    """Return ({name: [Entry]}, {name: [overridden AOSP modules]})."""
     entries = []
+    overrides = {}
+    section = "apps"
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
             line = line.split("#", 1)[0].strip()
             if not line:
                 continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+                if section not in ("apps", "overrides"):
+                    die(f"{path}:{lineno}: unknown section [{section}]")
+                continue
             cols = line.split()
+            if section == "overrides":
+                if len(cols) < 2:
+                    die(f"{path}:{lineno}: expected <name> <aosp module>...")
+                for c in cols:
+                    if not NAME_RE.match(c):
+                        die(f"{path}:{lineno}: invalid module name '{c}'")
+                overrides.setdefault(cols[0], []).append((lineno, cols[1:]))
+                continue
             if len(cols) != 7:
                 die(f"{path}:{lineno}: expected 7 columns "
                     f"(package name partition arch cert type repo), "
@@ -115,7 +131,16 @@ def parse_list(path):
                     die(f"{path}:{e.lineno}: {attr} of {e.name} differs from "
                         f"line {o.lineno}")
         mod.append(e)
-    return modules
+
+    resolved = {}
+    for name, items in overrides.items():
+        for lineno, targets in items:
+            if name not in modules:
+                die(f"{path}:{lineno}: override for unknown app '{name}'")
+            if name in targets:
+                die(f"{path}:{lineno}: {name} cannot override itself")
+            resolved.setdefault(name, set()).update(targets)
+    return modules, {n: sorted(t) for n, t in resolved.items()}
 
 
 def split_repo(url):
@@ -303,7 +328,7 @@ def bp_list(items):
     return "[" + ", ".join(f'"{i}"' for i in items) + "]"
 
 
-def gen_android_bp(modules):
+def gen_android_bp(modules, overrides):
     out = [f"// {HEADER}", ""]
     for name in sorted(modules, key=str.lower):
         entries = modules[name]
@@ -332,6 +357,8 @@ def gen_android_bp(modules):
         out.append("    dex_preopt: {")
         out.append("        enabled: false,")
         out.append("    },")
+        if name in overrides:
+            out.append(f"    overrides: {bp_list(overrides[name])},")
         if e.type == "priv":
             out.append(f"    required: {bp_list([privapp_module(name)])},")
         out.append("}")
@@ -392,7 +419,7 @@ def main():
     args = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
-    modules = parse_list(args.list)
+    modules, overrides = parse_list(args.list)
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     lock_path = os.path.join(out_dir, "versions.txt")
@@ -458,7 +485,7 @@ def main():
 
     remove_stale(out_dir, keep)
     write_if_changed(os.path.join(out_dir, "Android.bp"),
-                     gen_android_bp(modules))
+                     gen_android_bp(modules, overrides))
     write_if_changed(os.path.join(out_dir, "product.mk"),
                      gen_product_mk(modules))
     lock = [f"# {HEADER}", "#" + "\t".join(LOCK_FIELDS)]
