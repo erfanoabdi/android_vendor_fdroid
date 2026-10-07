@@ -430,7 +430,9 @@ def gen_android_bp(modules, overrides, uses_libs):
                 out.append("        },")
             out.append("    },")
         if e.cert == "presigned":
+            # Keep the APK byte-for-byte, the v2+ signature covers the zip.
             out.append("    presigned: true,")
+            out.append("    preprocessed: true,")
         elif e.cert != "default":
             out.append(f'    certificate: "{e.cert}",')
         if e.type == "priv":
