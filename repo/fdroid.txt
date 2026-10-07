@@ -1,2 +1,14 @@
-# F-Droid
--app/org.fdroid.fdroid_1000013.apk:app/F-Droid.apk;PRESIGNED
+# Apps to fetch from F-Droid repos. The latest suggested version is always used.
+#
+# Columns (whitespace separated):
+#   package    Android package name
+#   name       module name in AOSP, also the APK file name
+#   partition  system_ext | product
+#   arch       all | arm64 | arm | x86_64 | x86
+#              Use one line per arch (same name) for apps that ship split ABI APKs.
+#   cert       presigned | default | platform | shared | media | <any build key>
+#   type       app | priv
+#   repo       repo URL, optionally with ?fingerprint=<sha256> to verify the index
+#
+# package           name     partition   arch  cert       type  repo
+org.fdroid.fdroid   F-Droid  system_ext  all   presigned  app   https://f-droid.org/repo?fingerprint=43238D512C1E5EB2D6569F4A3AFBF5523418B82E0A3ED1552770ABB9A9C9CCAB

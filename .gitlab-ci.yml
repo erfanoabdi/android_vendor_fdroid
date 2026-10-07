@@ -1,14 +1,65 @@
+# Required CI/CD variables for the publish job:
+#   OUTPUT_REPO_URL     SSH URL of the prebuilts repo, e.g. git@gitlab.com:group/android_vendor_fdroid_prebuilts.git
+#   OUTPUT_REPO_SSH_KEY private SSH key (variable type "File", protected) of a deploy key
+#                       with write access added to that repo
+# Optional:
+#   OUTPUT_REPO_BRANCH  branch to push to (default: main)
+#
+# Add a pipeline schedule (e.g. daily) on the default branch to keep the apps up to date.
 
-test:
-  image: debian:stretch-slim
-  variables:
-    fingerprint: 37D2C98789D8311948394E3E41E7044E1DBA2E89
+default:
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update -y
+    - apt-get install -y --no-install-recommends ca-certificates git openssh-client openjdk-17-jdk-headless python3
+
+stages:
+  - check
+  - publish
+
+check:
+  stage: check
   script:
-    - apt update -y
-    - apt-get install -y --no-install-recommends bash ca-certificates dirmngr gnupg grep wget
-    - for f in *.sh */*.sh; do bash -n $f; done
-    - "! (gpg --list-keys | grep pub)"
-    - while ! gpg --keyserver pgp.mit.edu --recv-key $fingerprint; do sleep 10; done
-    - gpg --list-key --fingerprint | tr -d '[:space:]' | grep $fingerprint
-    - echo "${fingerprint}:6:" | gpg --import-ownertrust
-    - ./get_packages.sh
+    - python3 -m py_compile fdroid_sync.py
+    - python3 fdroid_sync.py --list repo/fdroid.txt --out out
+  artifacts:
+    paths:
+      - out/
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+publish:
+  stage: publish
+  resource_group: publish
+  variables:
+    OUTPUT_REPO_BRANCH: main
+  script:
+    - test -n "$OUTPUT_REPO_URL" && test -n "$OUTPUT_REPO_SSH_KEY"
+    - mkdir -p -m 700 ~/.ssh
+    # Accept both a "File" variable (path) and a plain variable (key contents).
+    - |
+      if [ -f "$OUTPUT_REPO_SSH_KEY" ]; then cp "$OUTPUT_REPO_SSH_KEY" ~/.ssh/id_deploy
+      else printf '%s\n' "$OUTPUT_REPO_SSH_KEY" > ~/.ssh/id_deploy; fi
+    - chmod 600 ~/.ssh/id_deploy
+    - export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    # Falls back to a plain clone when the branch does not exist yet (e.g. empty repo).
+    - git clone --depth 1 --branch "$OUTPUT_REPO_BRANCH" "$OUTPUT_REPO_URL" out
+        || { rm -rf out && git clone "$OUTPUT_REPO_URL" out; }
+    - python3 fdroid_sync.py --list repo/fdroid.txt --out out --summary summary.txt
+    - cd out
+    - git add -A
+    - |
+      if git diff --cached --quiet; then
+        echo "Nothing to publish."
+        exit 0
+      fi
+    - |
+      { echo "Update F-Droid prebuilts"; echo
+        if [ -s ../summary.txt ]; then cat ../summary.txt; else echo "Regenerate build files"; fi
+        echo; echo "Source: ${CI_PROJECT_URL}/-/commit/${CI_COMMIT_SHA}"; } > ../message.txt
+    - git -c user.name="F-Droid prebuilts bot" -c user.email="noreply@${CI_SERVER_HOST}"
+        commit -q -F ../message.txt
+    - git push origin "HEAD:${OUTPUT_REPO_BRANCH}"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
