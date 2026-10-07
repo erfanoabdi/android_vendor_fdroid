@@ -52,6 +52,10 @@ versions.txt    lock file: version, signer and sha256 of every APK
 apps/<name>/    APKs and privapp-permissions XMLs
 ```
 
+The `<uses-library>` tags of each APK's manifest are copied into
+`uses_libs` (required) and `optional_uses_libs` (`android:required="false"`),
+so Soong's uses-library check passes.
+
 When a version is published under several signers, the signer recorded in
 `versions.txt` is kept, so installed apps keep receiving updates. A
 signer change on a `presigned` app is an error; delete the app's row from

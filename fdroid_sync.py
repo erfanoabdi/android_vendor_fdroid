@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -304,6 +305,87 @@ def privapp_relpath(name):
     return f"apps/{name}/privapp-permissions-{name}.xml"
 
 
+# Binary XML (AXML) chunk types and android: attribute resource ids.
+AXML_STRING_POOL = 0x0001
+AXML_RESOURCE_MAP = 0x0180
+AXML_START_ELEMENT = 0x0102
+ATTR_NAME = 0x01010003
+ATTR_REQUIRED = 0x0101028E
+TYPE_STRING = 0x03
+TYPE_BOOLEAN = 0x12
+NO_INDEX = 0xFFFFFFFF
+
+
+def _axml_strings(data, off):
+    count, _, flags, strings_start = struct.unpack_from("<IIII", data, off + 8)
+    utf8 = flags & 0x100
+    base = off + strings_start
+    strings = []
+    for i in range(count):
+        pos = base + struct.unpack_from("<I", data, off + 28 + 4 * i)[0]
+        if utf8:
+            for _ in range(2):  # UTF-16 length, then UTF-8 byte length
+                n = data[pos]
+                pos += 1
+                if n & 0x80:
+                    n = ((n & 0x7F) << 8) | data[pos]
+                    pos += 1
+            strings.append(data[pos:pos + n].decode("utf-8", "replace"))
+        else:
+            n = struct.unpack_from("<H", data, pos)[0]
+            pos += 2
+            if n & 0x8000:
+                n = ((n & 0x7FFF) << 16) | struct.unpack_from("<H", data,
+                                                              pos)[0]
+                pos += 2
+            strings.append(data[pos:pos + 2 * n].decode("utf-16-le",
+                                                        "replace"))
+    return strings
+
+
+def uses_libraries_of(apk_path):
+    """Return {library: required} from the APK's <uses-library> tags."""
+    with zipfile.ZipFile(apk_path) as z:
+        data = z.read("AndroidManifest.xml")
+    strings, resmap, libs = [], [], {}
+    pos = struct.unpack_from("<H", data, 2)[0]
+    while pos + 8 <= len(data):
+        ctype, hsize, csize = struct.unpack_from("<HHI", data, pos)
+        if csize < 8:
+            break
+        if ctype == AXML_STRING_POOL:
+            strings = _axml_strings(data, pos)
+        elif ctype == AXML_RESOURCE_MAP:
+            resmap = list(struct.unpack_from(f"<{(csize - hsize) // 4}I",
+                                             data, pos + hsize))
+        elif ctype == AXML_START_ELEMENT:
+            _, tag, astart, asize, acount = struct.unpack_from(
+                "<IIHHH", data, pos + hsize)
+            if strings[tag] == "uses-library":
+                name, required = None, True
+                for i in range(acount):
+                    a = pos + hsize + astart + i * asize
+                    _, aname, raw, _, _, dtype, value = struct.unpack_from(
+                        "<IIIHBBI", data, a)
+                    rid = resmap[aname] if aname < len(resmap) else None
+                    if rid == ATTR_NAME or (rid is None
+                                            and strings[aname] == "name"):
+                        if raw != NO_INDEX:
+                            name = strings[raw]
+                        elif dtype == TYPE_STRING:
+                            name = strings[value]
+                    elif rid == ATTR_REQUIRED or (
+                            rid is None and strings[aname] == "required"):
+                        if dtype == TYPE_BOOLEAN:
+                            required = value != 0
+                        elif raw != NO_INDEX:
+                            required = strings[raw] != "false"
+                if name:
+                    libs[name] = libs.get(name, False) or required
+        pos += csize
+    return libs
+
+
 def permissions_of(apk):
     perms = set()
     for key in ("uses-permission", "uses-permission-sdk-23"):
@@ -328,7 +410,7 @@ def bp_list(items):
     return "[" + ", ".join(f'"{i}"' for i in items) + "]"
 
 
-def gen_android_bp(modules, overrides):
+def gen_android_bp(modules, overrides, uses_libs):
     out = [f"// {HEADER}", ""]
     for name in sorted(modules, key=str.lower):
         entries = modules[name]
@@ -357,6 +439,13 @@ def gen_android_bp(modules, overrides):
         out.append("    dex_preopt: {")
         out.append("        enabled: false,")
         out.append("    },")
+        libs = uses_libs.get(name, {})
+        required = sorted(l for l, r in libs.items() if r)
+        optional = sorted(l for l, r in libs.items() if not r)
+        if required:
+            out.append(f"    uses_libs: {bp_list(required)},")
+        if optional:
+            out.append(f"    optional_uses_libs: {bp_list(optional)},")
         if name in overrides:
             out.append(f"    overrides: {bp_list(overrides[name])},")
         if e.type == "priv":
@@ -427,6 +516,7 @@ def main():
     new_lock = {}
     keep = set()
     changes = []
+    uses_libs = {}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         repos = {}
@@ -464,6 +554,10 @@ def main():
                     else:
                         changes.append(f"{label}: add {version}")
 
+                libs = uses_libs.setdefault(name, {})
+                for lib, req in uses_libraries_of(dest).items():
+                    libs[lib] = libs.get(lib, False) or req
+
                 new_lock[(e.name, e.arch)] = {
                     "name": e.name, "arch": e.arch, "package": e.package,
                     "versionName": apk["versionName"],
@@ -485,7 +579,7 @@ def main():
 
     remove_stale(out_dir, keep)
     write_if_changed(os.path.join(out_dir, "Android.bp"),
-                     gen_android_bp(modules, overrides))
+                     gen_android_bp(modules, overrides, uses_libs))
     write_if_changed(os.path.join(out_dir, "product.mk"),
                      gen_product_mk(modules))
     lock = [f"# {HEADER}", "#" + "\t".join(LOCK_FIELDS)]
