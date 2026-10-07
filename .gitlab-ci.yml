@@ -22,10 +22,6 @@ check:
   script:
     - python3 -m py_compile fdroid_sync.py
     - python3 fdroid_sync.py --list repo/fdroid.txt --out out
-  artifacts:
-    paths:
-      - out/
-    expire_in: 1 week
   rules:
     - if: $CI_PIPELINE_SOURCE != "schedule"
 

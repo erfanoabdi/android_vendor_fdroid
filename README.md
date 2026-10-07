@@ -60,7 +60,7 @@ $ ./fdroid_sync.py --out ../android_vendor_fdroid_prebuilts
 GitLab CI
 ---------
 
-The `check` job runs the sync into `out/` and keeps it as an artifact.
+The `check` job runs the sync to check that every app in the list resolves.
 On the default branch the `publish` job syncs into the prebuilts repo and pushes a
 commit over SSH when anything changed.
 
