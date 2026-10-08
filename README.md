@@ -47,10 +47,19 @@ Output
 
 ```
 Android.bp      android_app_import (+ prebuilt_etc for priv-app permissions)
-product.mk      PRODUCT_PACKAGES for all apps
+product.mk      PRODUCT_PACKAGES for all apps (+ PRODUCT_COPY_FILES for stub .apk.gz)
 versions.txt    lock file: version, signer and sha256 of every APK
-apps/<name>/    APKs and privapp-permissions XMLs
+apps/<name>/    APKs (+ .apk.gz for stubs) and privapp-permissions XMLs
 ```
+
+Presigned APKs with compressed JNI libraries can't be preinstalled as is
+(the libraries would never be extracted, and repacking breaks the
+signature). Those are installed the Android Go way instead:
+`<name>-Stub` (the APK itself) from `Android.bp`, and
+`app/<name>/<name>.apk.gz` through `PRODUCT_COPY_FILES` in `product.mk`.
+PackageManager decompresses the `.apk.gz` to `/data` on first boot. Such
+apps must be listed with a single arch. Other presigned apps can be forced
+to install this way by listing their names in a `[stubs]` section.
 
 The `<uses-library>` tags of each APK's manifest are copied into
 `uses_libs` (required) and `optional_uses_libs` (`android:required="false"`),

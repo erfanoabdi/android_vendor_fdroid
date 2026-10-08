@@ -10,8 +10,12 @@
 #   type       app | priv
 #   repo       repo URL, optionally with ?fingerprint=<sha256> to verify the index
 #
-# The [overrides] section at the end lists AOSP modules each app replaces,
-# so they are not installed.
+# The [overrides] section lists AOSP modules each app replaces, so they are
+# not installed.
+#
+# The [stubs] section lists presigned apps to install as <name>-Stub plus a
+# <name>.apk.gz that is decompressed to /data on first boot. This is done
+# automatically for presigned APKs with compressed JNI libs.
 #
 [apps]
 
@@ -25,3 +29,6 @@ com.android.vending                   FakeStore           product  all    presig
 
 [overrides]
 # name                AOSP modules to replace (space separated)
+
+[stubs]
+# names of apps to always install as stub (space or line separated)

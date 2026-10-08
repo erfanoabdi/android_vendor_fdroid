@@ -18,6 +18,7 @@
 and generate Android.bp, product.mk and versions.txt for an AOSP build."""
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -43,6 +44,11 @@ PARTITIONS = {
     "system_ext": "system_ext_specific",
     "product": "product_specific",
 }
+COPY_OUT = {
+    "system_ext": "$(TARGET_COPY_OUT_SYSTEM_EXT)",
+    "product": "$(TARGET_COPY_OUT_PRODUCT)",
+}
+APP_DIRS = {"app": "app", "priv": "priv-app"}
 TYPES = ["app", "priv"]
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 LOCK_FIELDS = ["name", "arch", "package", "versionName", "versionCode",
@@ -76,9 +82,11 @@ class Entry:
 
 
 def parse_list(path):
-    """Return ({name: [Entry]}, {name: [overridden AOSP modules]})."""
+    """Return ({name: [Entry]}, {name: [overridden AOSP modules]},
+    {names forced to be installed as stub})."""
     entries = []
     overrides = {}
+    forced_stubs = {}
     section = "apps"
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
@@ -87,7 +95,7 @@ def parse_list(path):
                 continue
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip()
-                if section not in ("apps", "overrides"):
+                if section not in ("apps", "overrides", "stubs"):
                     die(f"{path}:{lineno}: unknown section [{section}]")
                 continue
             cols = line.split()
@@ -98,6 +106,10 @@ def parse_list(path):
                     if not NAME_RE.match(c):
                         die(f"{path}:{lineno}: invalid module name '{c}'")
                 overrides.setdefault(cols[0], []).append((lineno, cols[1:]))
+                continue
+            if section == "stubs":
+                for c in cols:
+                    forced_stubs[c] = lineno
                 continue
             if len(cols) != 7:
                 die(f"{path}:{lineno}: expected 7 columns "
@@ -141,7 +153,14 @@ def parse_list(path):
             if name in targets:
                 die(f"{path}:{lineno}: {name} cannot override itself")
             resolved.setdefault(name, set()).update(targets)
-    return modules, {n: sorted(t) for n, t in resolved.items()}
+    for name, lineno in forced_stubs.items():
+        if name not in modules:
+            die(f"{path}:{lineno}: stub for unknown app '{name}'")
+        if modules[name][0].cert != "presigned":
+            die(f"{path}:{lineno}: only presigned apps can be stubs, the "
+                f"stub and the .apk.gz must have the same signature")
+    return (modules, {n: sorted(t) for n, t in resolved.items()},
+            set(forced_stubs))
 
 
 def split_repo(url):
@@ -386,6 +405,23 @@ def uses_libraries_of(apk_path):
     return libs
 
 
+def has_compressed_jni(apk_path):
+    with zipfile.ZipFile(apk_path) as z:
+        return any(i.filename.startswith("lib/")
+                   and i.filename.endswith(".so")
+                   and i.compress_type != zipfile.ZIP_STORED
+                   for i in z.infolist())
+
+
+def write_gz(src, dest):
+    """Deterministic gzip, so unchanged APKs don't produce git diffs."""
+    with open(src, "rb") as fi, open(dest + ".part", "wb") as raw, \
+            gzip.GzipFile(filename="", mode="wb", fileobj=raw,
+                          compresslevel=9, mtime=0) as fo:
+        shutil.copyfileobj(fi, fo, 1 << 20)
+    os.replace(dest + ".part", dest)
+
+
 def permissions_of(apk):
     perms = set()
     for key in ("uses-permission", "uses-permission-sdk-23"):
@@ -410,14 +446,20 @@ def bp_list(items):
     return "[" + ", ".join(f'"{i}"' for i in items) + "]"
 
 
-def gen_android_bp(modules, overrides, uses_libs):
+def split_uses_libs(libs):
+    return (sorted(lib for lib, req in libs.items() if req),
+            sorted(lib for lib, req in libs.items() if not req))
+
+
+def gen_android_bp(modules, overrides, uses_libs, stubs):
     out = [f"// {HEADER}", ""]
     for name in sorted(modules, key=str.lower):
         entries = modules[name]
         e = entries[0]
         partition = PARTITIONS[e.partition]
+        stub = name in stubs
         out.append("android_app_import {")
-        out.append(f'    name: "{name}",')
+        out.append(f'    name: "{name}-Stub",' if stub else f'    name: "{name}",')
         universal = [x for x in entries if x.arch == "all"]
         if universal:
             out.append(f'    apk: "{apk_relpath(universal[0])}",')
@@ -433,6 +475,11 @@ def gen_android_bp(modules, overrides, uses_libs):
             # Keep the APK byte-for-byte, the v2+ signature covers the zip.
             out.append("    presigned: true,")
             out.append("    preprocessed: true,")
+            if stub:
+                # Only a placeholder: PackageManager installs the .apk.gz
+                # from product.mk to /data on first boot, so the compressed
+                # JNI libs in here are never loaded.
+                out.append("    skip_preprocessed_apk_checks: true,")
         elif e.cert != "default":
             out.append(f'    certificate: "{e.cert}",')
         if e.type == "priv":
@@ -441,9 +488,7 @@ def gen_android_bp(modules, overrides, uses_libs):
         out.append("    dex_preopt: {")
         out.append("        enabled: false,")
         out.append("    },")
-        libs = uses_libs.get(name, {})
-        required = sorted(l for l, r in libs.items() if r)
-        optional = sorted(l for l, r in libs.items() if not r)
+        required, optional = split_uses_libs(uses_libs.get(name, {}))
         if required:
             out.append(f"    uses_libs: {bp_list(required)},")
         if optional:
@@ -454,26 +499,46 @@ def gen_android_bp(modules, overrides, uses_libs):
             out.append(f"    required: {bp_list([privapp_module(name)])},")
         out.append("}")
         out.append("")
-        if e.type == "priv":
-            out.append("prebuilt_etc {")
-            out.append(f'    name: "{privapp_module(name)}",')
-            out.append(f'    src: "{privapp_relpath(name)}",')
-            out.append('    sub_dir: "permissions",')
-            out.append(f"    {partition}: true,")
-            out.append("}")
-            out.append("")
+        out += gen_privapp_bp(name, e, partition)
     return "\n".join(out)
+
+
+def gen_privapp_bp(name, e, partition):
+    if e.type != "priv":
+        return []
+    return ["prebuilt_etc {",
+            f'    name: "{privapp_module(name)}",',
+            f'    src: "{privapp_relpath(name)}",',
+            '    sub_dir: "permissions",',
+            f"    {partition}: true,",
+            "}",
+            ""]
 
 
 def privapp_module(name):
     return f"privapp-permissions-{name}.xml"
 
 
-def gen_product_mk(modules):
-    out = [f"# {HEADER}", "", "PRODUCT_PACKAGES += \\"]
-    names = sorted(modules, key=str.lower)
+def gen_product_mk(modules, stubs):
+    out = [f"# {HEADER}", "",
+           "FDROID_PREBUILTS_PATH := "
+           "$(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))", "",
+           "PRODUCT_PACKAGES += \\"]
+    names = [n + "-Stub" if n in stubs else n
+             for n in sorted(modules, key=str.lower)]
     out += [f"    {n}" + (" \\" if i < len(names) - 1 else "")
             for i, n in enumerate(names)]
+    if stubs:
+        # Presigned APKs with compressed JNI libs: <name>-Stub is installed
+        # from Android.bp, PackageManager decompresses <name>.apk.gz to /data
+        # on first boot (like on Android Go).
+        out += ["", "PRODUCT_COPY_FILES += \\"]
+        names = sorted(stubs, key=str.lower)
+        for i, n in enumerate(names):
+            e = modules[n][0]
+            dest = f"{COPY_OUT[e.partition]}/{APP_DIRS[e.type]}/{n}/{n}.apk.gz"
+            out.append(f"    $(FDROID_PREBUILTS_PATH)/{apk_relpath(e)}.gz:{dest}"
+                       + (" \\" if i < len(names) - 1 else ""))
     return "\n".join(out) + "\n"
 
 
@@ -510,7 +575,7 @@ def main():
     args = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
-    modules, overrides = parse_list(args.list)
+    modules, overrides, forced_stubs = parse_list(args.list)
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     lock_path = os.path.join(out_dir, "versions.txt")
@@ -519,11 +584,13 @@ def main():
     keep = set()
     changes = []
     uses_libs = {}
+    stubs = set(forced_stubs)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         repos = {}
         for name in sorted(modules, key=str.lower):
             perms = set()
+            fetched = []
             for e in modules[name]:
                 if e.repo not in repos:
                     repos[e.repo] = Repo(e.repo, tmpdir)
@@ -538,9 +605,11 @@ def main():
                 label = name if e.arch == "all" else f"{name} [{e.arch}]"
                 version = f"{apk['versionName']} ({apk['versionCode']})"
 
+                fresh = False
                 if os.path.exists(dest) and sha256_file(dest) == apk["hash"]:
                     print(f"- {label}: {version} up to date")
                 else:
+                    fresh = True
                     print(f"- {label}: downloading {apk['apkName']}")
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     part = dest + ".part"
@@ -556,6 +625,10 @@ def main():
                     else:
                         changes.append(f"{label}: add {version}")
 
+                fetched.append((rel, fresh))
+                if e.cert == "presigned" and has_compressed_jni(dest):
+                    stubs.add(name)
+
                 libs = uses_libs.setdefault(name, {})
                 for lib, req in uses_libraries_of(dest).items():
                     libs[lib] = libs.get(lib, False) or req
@@ -567,6 +640,17 @@ def main():
                     "signer": apk.get("signer", ""), "sha256": apk["hash"],
                     "repo": split_repo(e.repo)[0],
                 }
+
+            if name in stubs:
+                if len(fetched) > 1:
+                    die(f"{name}: presigned APK with compressed JNI libs is "
+                        f"installed as a stub, which supports one APK only; "
+                        f"list a single arch for it")
+                for rel, fresh in fetched:
+                    gz = os.path.join(out_dir, rel + ".gz")
+                    keep.add(rel + ".gz")
+                    if fresh or not os.path.exists(gz):
+                        write_gz(os.path.join(out_dir, rel), gz)
 
             if modules[name][0].type == "priv":
                 rel = privapp_relpath(name)
@@ -581,9 +665,9 @@ def main():
 
     remove_stale(out_dir, keep)
     write_if_changed(os.path.join(out_dir, "Android.bp"),
-                     gen_android_bp(modules, overrides, uses_libs))
+                     gen_android_bp(modules, overrides, uses_libs, stubs))
     write_if_changed(os.path.join(out_dir, "product.mk"),
-                     gen_product_mk(modules))
+                     gen_product_mk(modules, stubs))
     lock = [f"# {HEADER}", "#" + "\t".join(LOCK_FIELDS)]
     lock += ["\t".join(row[f] for f in LOCK_FIELDS)
              for _, row in sorted(new_lock.items())]
