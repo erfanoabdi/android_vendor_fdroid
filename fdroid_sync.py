@@ -83,10 +83,10 @@ class Entry:
 
 def parse_list(path):
     """Return ({name: [Entry]}, {name: [overridden AOSP modules]},
-    {names forced to be installed as stub})."""
+    {names to install as stub})."""
     entries = []
     overrides = {}
-    forced_stubs = {}
+    stubs = {}
     section = "apps"
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
@@ -109,7 +109,7 @@ def parse_list(path):
                 continue
             if section == "stubs":
                 for c in cols:
-                    forced_stubs[c] = lineno
+                    stubs[c] = lineno
                 continue
             if len(cols) != 7:
                 die(f"{path}:{lineno}: expected 7 columns "
@@ -153,14 +153,17 @@ def parse_list(path):
             if name in targets:
                 die(f"{path}:{lineno}: {name} cannot override itself")
             resolved.setdefault(name, set()).update(targets)
-    for name, lineno in forced_stubs.items():
+    for name, lineno in stubs.items():
         if name not in modules:
             die(f"{path}:{lineno}: stub for unknown app '{name}'")
         if modules[name][0].cert != "presigned":
             die(f"{path}:{lineno}: only presigned apps can be stubs, the "
                 f"stub and the .apk.gz must have the same signature")
+        if len(modules[name]) > 1:
+            die(f"{path}:{lineno}: stubs support one APK only, list a "
+                f"single arch for {name}")
     return (modules, {n: sorted(t) for n, t in resolved.items()},
-            set(forced_stubs))
+            set(stubs))
 
 
 def split_repo(url):
@@ -405,14 +408,6 @@ def uses_libraries_of(apk_path):
     return libs
 
 
-def has_compressed_jni(apk_path):
-    with zipfile.ZipFile(apk_path) as z:
-        return any(i.filename.startswith("lib/")
-                   and i.filename.endswith(".so")
-                   and i.compress_type != zipfile.ZIP_STORED
-                   for i in z.infolist())
-
-
 def write_gz(src, dest):
     """Deterministic gzip, so unchanged APKs don't produce git diffs."""
     with open(src, "rb") as fi, open(dest + ".part", "wb") as raw, \
@@ -475,11 +470,10 @@ def gen_android_bp(modules, overrides, uses_libs, stubs):
             # Keep the APK byte-for-byte, the v2+ signature covers the zip.
             out.append("    presigned: true,")
             out.append("    preprocessed: true,")
-            if stub:
-                # Only a placeholder: PackageManager installs the .apk.gz
-                # from product.mk to /data on first boot, so the compressed
-                # JNI libs in here are never loaded.
-                out.append("    skip_preprocessed_apk_checks: true,")
+            # The APK can't be fixed up without breaking its signature, so
+            # don't insist on uncompressed JNI libs / priv-app dex. Apps that
+            # can't run that way are listed in [stubs].
+            out.append("    skip_preprocessed_apk_checks: true,")
         elif e.cert != "default":
             out.append(f'    certificate: "{e.cert}",')
         if e.type == "priv":
@@ -575,7 +569,7 @@ def main():
     args = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
-    modules, overrides, forced_stubs = parse_list(args.list)
+    modules, overrides, stubs = parse_list(args.list)
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     lock_path = os.path.join(out_dir, "versions.txt")
@@ -584,7 +578,6 @@ def main():
     keep = set()
     changes = []
     uses_libs = {}
-    stubs = set(forced_stubs)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         repos = {}
@@ -626,8 +619,6 @@ def main():
                         changes.append(f"{label}: add {version}")
 
                 fetched.append((rel, fresh))
-                if e.cert == "presigned" and has_compressed_jni(dest):
-                    stubs.add(name)
 
                 libs = uses_libs.setdefault(name, {})
                 for lib, req in uses_libraries_of(dest).items():
@@ -642,10 +633,6 @@ def main():
                 }
 
             if name in stubs:
-                if len(fetched) > 1:
-                    die(f"{name}: presigned APK with compressed JNI libs is "
-                        f"installed as a stub, which supports one APK only; "
-                        f"list a single arch for it")
                 for rel, fresh in fetched:
                     gz = os.path.join(out_dir, rel + ".gz")
                     keep.add(rel + ".gz")

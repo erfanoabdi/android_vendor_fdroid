@@ -52,14 +52,14 @@ versions.txt    lock file: version, signer and sha256 of every APK
 apps/<name>/    APKs (+ .apk.gz for stubs) and privapp-permissions XMLs
 ```
 
-Presigned APKs with compressed JNI libraries can't be preinstalled as is
-(the libraries would never be extracted, and repacking breaks the
-signature). Those are installed the Android Go way instead:
+Presigned APKs are installed byte-for-byte, with Soong's preprocessed APK
+checks skipped. If an app fails to load its compressed JNI libraries when
+preinstalled that way (bundled system apps don't get them extracted), list
+it in a `[stubs]` section. It is then installed the Android Go way:
 `<name>-Stub` (the APK itself) from `Android.bp`, and
-`app/<name>/<name>.apk.gz` through `PRODUCT_COPY_FILES` in `product.mk`.
-PackageManager decompresses the `.apk.gz` to `/data` on first boot. Such
-apps must be listed with a single arch. Other presigned apps can be forced
-to install this way by listing their names in a `[stubs]` section.
+`app/<name>/<name>.apk.gz` through `PRODUCT_COPY_FILES` in `product.mk`,
+which PackageManager decompresses to `/data` on first boot. Stubs must be
+listed with a single arch.
 
 The `<uses-library>` tags of each APK's manifest are copied into
 `uses_libs` (required) and `optional_uses_libs` (`android:required="false"`),

@@ -14,8 +14,8 @@
 # not installed.
 #
 # The [stubs] section lists presigned apps to install as <name>-Stub plus a
-# <name>.apk.gz that is decompressed to /data on first boot. This is done
-# automatically for presigned APKs with compressed JNI libs.
+# <name>.apk.gz that is decompressed to /data on first boot. Use it for apps
+# that fail to load their compressed JNI libs when preinstalled as is.
 #
 [apps]
 
@@ -31,4 +31,4 @@ com.android.vending                   FakeStore           product  all    presig
 # name                AOSP modules to replace (space separated)
 
 [stubs]
-# names of apps to always install as stub (space or line separated)
+# names of apps to install as stub (space or line separated)
