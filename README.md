@@ -52,8 +52,10 @@ versions.txt    lock file: version, signer and sha256 of every APK
 apps/<name>/    APKs (+ .apk.gz for stubs) and privapp-permissions XMLs
 ```
 
-Presigned APKs are installed byte-for-byte, with Soong's preprocessed APK
-checks skipped. If an app fails to load its compressed JNI libraries when
+Presigned APKs are installed byte-for-byte. When one has compressed JNI
+libraries, compressed dex in a priv-app or bad zip alignment, Soong's
+preprocessed APK checks are skipped for it (Soong rejects skipping them
+for APKs without issues). If an app fails to load its compressed JNI libraries when
 preinstalled that way (bundled system apps don't get them extracted), list
 it in a `[stubs]` section. It is then installed the Android Go way:
 `<name>-Stub` (the APK itself) from `Android.bp`, and

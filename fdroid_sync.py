@@ -408,6 +408,28 @@ def uses_libraries_of(apk_path):
     return libs
 
 
+def preprocessed_issue(apk_path, privileged):
+    """Mirror build/soong/scripts/check_prebuilt_presigned_apk.py: return
+    why a preprocessed APK fails Soong's checks, or None. Soong also fails
+    when skip_preprocessed_apk_checks is set on an APK without issues."""
+    with zipfile.ZipFile(apk_path) as z, open(apk_path, "rb") as f:
+        for i in z.infolist():
+            is_so = i.filename.startswith("lib/") and i.filename.endswith(".so")
+            if i.compress_type != zipfile.ZIP_STORED:
+                if is_so:
+                    return "compressed JNI libraries"
+                if privileged and i.filename.endswith(".dex"):
+                    return "compressed dex files and is privileged"
+                continue
+            # zipalign -c -p 4: stored data 4-byte aligned, .so page aligned
+            f.seek(i.header_offset + 26)
+            name_len, extra_len = struct.unpack("<HH", f.read(4))
+            offset = i.header_offset + 30 + name_len + extra_len
+            if offset % (4096 if is_so else 4):
+                return "improper zip alignment"
+    return None
+
+
 def write_gz(src, dest):
     """Deterministic gzip, so unchanged APKs don't produce git diffs."""
     with open(src, "rb") as fi, open(dest + ".part", "wb") as raw, \
@@ -446,7 +468,7 @@ def split_uses_libs(libs):
             sorted(lib for lib, req in libs.items() if not req))
 
 
-def gen_android_bp(modules, overrides, uses_libs, stubs):
+def gen_android_bp(modules, overrides, uses_libs, stubs, skip_checks):
     out = [f"// {HEADER}", ""]
     for name in sorted(modules, key=str.lower):
         entries = modules[name]
@@ -471,9 +493,10 @@ def gen_android_bp(modules, overrides, uses_libs, stubs):
             out.append("    presigned: true,")
             out.append("    preprocessed: true,")
             # The APK can't be fixed up without breaking its signature, so
-            # don't insist on uncompressed JNI libs / priv-app dex. Apps that
-            # can't run that way are listed in [stubs].
-            out.append("    skip_preprocessed_apk_checks: true,")
+            # accept compressed JNI libs / priv-app dex. Apps that can't run
+            # that way are listed in [stubs].
+            if name in skip_checks:
+                out.append("    skip_preprocessed_apk_checks: true,")
         elif e.cert != "default":
             out.append(f'    certificate: "{e.cert}",')
         if e.type == "priv":
@@ -578,12 +601,14 @@ def main():
     keep = set()
     changes = []
     uses_libs = {}
+    skip_checks = set()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         repos = {}
         for name in sorted(modules, key=str.lower):
             perms = set()
             fetched = []
+            issues = {}
             for e in modules[name]:
                 if e.repo not in repos:
                     repos[e.repo] = Repo(e.repo, tmpdir)
@@ -619,6 +644,8 @@ def main():
                         changes.append(f"{label}: add {version}")
 
                 fetched.append((rel, fresh))
+                if e.cert == "presigned":
+                    issues[e.arch] = preprocessed_issue(dest, e.type == "priv")
 
                 libs = uses_libs.setdefault(name, {})
                 for lib, req in uses_libraries_of(dest).items():
@@ -631,6 +658,15 @@ def main():
                     "signer": apk.get("signer", ""), "sha256": apk["hash"],
                     "repo": split_repo(e.repo)[0],
                 }
+
+            if any(issues.values()):
+                skip_checks.add(name)
+                print(f"  {name}: {', '.join(sorted(set(filter(None, issues.values()))))}"
+                      f", skipping Soong's preprocessed APK checks")
+                if not all(issues.values()):
+                    # The property can't be set per arch.
+                    warn(f"{name}: only some arches have preprocessed APK "
+                         f"issues, the others will fail Soong's check")
 
             if name in stubs:
                 for rel, fresh in fetched:
@@ -652,7 +688,8 @@ def main():
 
     remove_stale(out_dir, keep)
     write_if_changed(os.path.join(out_dir, "Android.bp"),
-                     gen_android_bp(modules, overrides, uses_libs, stubs))
+                     gen_android_bp(modules, overrides, uses_libs, stubs,
+                                    skip_checks))
     write_if_changed(os.path.join(out_dir, "product.mk"),
                      gen_product_mk(modules, stubs))
     lock = [f"# {HEADER}", "#" + "\t".join(LOCK_FIELDS)]
